@@ -1,0 +1,496 @@
+use std::{env, sync::Arc};
+
+use anyhow::Result;
+use async_trait::async_trait;
+use http_client::{HttpClient, Request, RequestBuilderExt, ResponseAsyncBodyExt, http::HeaderMap};
+
+use crate::{
+    ignore_patterns::DEFAULT_IGNORE_PATTERNS,
+    provider::{GitProvider, GitRef, RepoItem, RepoItemType, RepoNode, create_tree_structure},
+};
+
+const MAX_FILES: usize = 500;
+
+#[derive(Debug, serde::Deserialize)]
+struct GitLabProject {
+    // Make all fields optional to handle different API response formats
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    default_branch: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitLabRepositoryFile {
+    #[serde(default)]
+    file_name: String,
+    #[serde(default)]
+    file_path: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(rename = "type", default)]
+    item_type: String,
+}
+
+pub struct GitLabProvider {
+    http_client: Arc<dyn HttpClient>,
+    gitlab_token: Option<String>,
+}
+
+impl GitLabProvider {
+    pub fn new(http_client: Arc<dyn HttpClient>) -> Self {
+        Self {
+            http_client,
+            gitlab_token: env::var("GITLAB_TOKEN").ok(),
+        }
+    }
+
+    async fn fetch_repo_metadata(&self, repo_path: &str) -> Result<GitLabProject> {
+        let encoded_path = urlencoding::encode(repo_path);
+        let url = format!("https://gitlab.com/api/v4/projects/{}", encoded_path);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("User-Agent", "GitIngest-MCP".parse()?);
+
+        if let Some(gitlab_token) = &self.gitlab_token {
+            headers.insert("PRIVATE-TOKEN", gitlab_token.parse()?);
+        }
+
+        let response = self
+            .http_client
+            .send(
+                Request::builder()
+                    .uri(&url)
+                    .method("GET")
+                    .headers(headers)
+                    .end()?,
+            )
+            .await?;
+
+        // Try to parse the response - if it fails, use default values
+        let project: GitLabProject = match response.json().await {
+            Ok(project) => project,
+            Err(e) => {
+                eprintln!("Error parsing GitLab project response: {}", e);
+                // Return a default project with minimal info
+                GitLabProject {
+                    name: Some("Unknown".to_string()),
+                    default_branch: None,
+                }
+            }
+        };
+
+        Ok(project)
+    }
+
+    fn parse_repo_path(&self, repo_path: &str) -> Result<(String, Option<String>)> {
+        // GitLab uses URL-encoded paths in the API
+        let encoded_path = urlencoding::encode(repo_path);
+
+        // Extract branch if specified
+        let segments: Vec<&str> = repo_path.split("/-/").collect();
+        let _path = segments[0].to_string();
+
+        let branch = if segments.len() > 1 {
+            if segments[1].starts_with("tree/") {
+                Some(segments[1][5..].to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok((encoded_path.to_string(), branch))
+    }
+
+    async fn fetch_repository_tree(
+        &self,
+        repo_path: &str,
+        path: &str,
+        ref_name: Option<&str>,
+    ) -> Result<Vec<RepoItem>> {
+        let encoded_path = urlencoding::encode(repo_path);
+        let mut url = format!(
+            "https://gitlab.com/api/v4/projects/{}/repository/tree",
+            encoded_path
+        );
+
+        // Add query parameters
+        let mut has_param = false;
+
+        if !path.is_empty() {
+            url.push_str(&format!(
+                "{}path={}",
+                if has_param { "&" } else { "?" },
+                path
+            ));
+            has_param = true;
+        }
+
+        if let Some(ref_name) = ref_name {
+            url.push_str(&format!(
+                "{}ref={}",
+                if has_param { "&" } else { "?" },
+                ref_name
+            ));
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert("User-Agent", "GitIngest-MCP".parse()?);
+
+        if let Some(gitlab_token) = &self.gitlab_token {
+            headers.insert("PRIVATE-TOKEN", gitlab_token.parse()?);
+        }
+
+        let response = self
+            .http_client
+            .send(
+                Request::builder()
+                    .uri(&url)
+                    .method("GET")
+                    .headers(headers)
+                    .end()?,
+            )
+            .await?;
+
+        // Try to parse the response - if it fails, return an empty tree
+        let tree: Vec<GitLabRepositoryFile> = match response.json().await {
+            Ok(tree) => tree,
+            Err(e) => {
+                eprintln!("Error parsing GitLab tree response: {}", e);
+                Vec::new()
+            }
+        };
+
+        let items = tree
+            .into_iter()
+            .map(|item| {
+                RepoItem {
+                    name: item.file_name,
+                    path: item.file_path,
+                    item_type: match item.item_type.as_str() {
+                        "blob" => RepoItemType::File,
+                        "tree" => RepoItemType::Directory,
+                        _ => RepoItemType::File, // Default to file for anything else
+                    },
+                    size: item.size,
+                }
+            })
+            .collect();
+
+        Ok(items)
+    }
+    
+    async fn fetch_file_content(
+        &self,
+        repo_path: &str,
+        file_path: &str,
+        git_ref: Option<&str>,
+    ) -> Result<String> {
+        let encoded_repo_path = urlencoding::encode(repo_path);
+        let encoded_file_path = urlencoding::encode(file_path);
+        
+        let mut url = format!(
+            "https://gitlab.com/api/v4/projects/{}/repository/files/{}",
+            encoded_repo_path, encoded_file_path
+        );
+        
+        // Add ref parameter if provided
+        if let Some(ref_name) = git_ref {
+            url.push_str(&format!("?ref={}", ref_name));
+        }
+        
+        let mut headers = HeaderMap::new();
+        headers.insert("User-Agent", "GitIngest-MCP".parse()?);
+        
+        if let Some(gitlab_token) = &self.gitlab_token {
+            headers.insert("PRIVATE-TOKEN", gitlab_token.parse()?);
+        }
+        
+        let response = self
+            .http_client
+            .send(
+                Request::builder()
+                    .uri(&url)
+                    .method("GET")
+                    .headers(headers)
+                    .end()?,
+            )
+            .await?;
+            
+        // Check for error status
+        if response.status().is_client_error() {
+            if response.status().as_u16() == 404 {
+                return Err(anyhow::anyhow!("File not found: {}", file_path));
+            } else {
+                return Err(anyhow::anyhow!("Failed to fetch file content. Status: {}", response.status()));
+            }
+        }
+        
+        // GitLab API returns a JSON structure with file content
+        #[derive(serde::Deserialize)]
+        struct GitLabFileContent {
+            content: String,
+            encoding: String,
+        }
+        
+        let file_data: GitLabFileContent = match response.json().await {
+            Ok(data) => data,
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to parse GitLab API response: {}", e));
+            }
+        };
+        
+        // GitLab returns base64-encoded content
+        if file_data.encoding == "base64" {
+            let content_bytes = base64::decode(&file_data.content)?;
+            Ok(String::from_utf8(content_bytes)?)
+        } else {
+            // For other encodings (should be rare)
+            Ok(file_data.content)
+        }
+    }
+
+    async fn set_ignore_patterns(
+        &self,
+        _repo_path: &str,
+        _ref_name: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let ignore_patterns = DEFAULT_IGNORE_PATTERNS
+            .iter()
+            .map(|&s| s.to_string())
+            .collect::<Vec<String>>();
+
+        // For simplicity, we'll just use the default ignore patterns
+        // A real implementation would fetch and parse the .gitignore file
+
+        Ok(ignore_patterns)
+    }
+
+    fn should_include(&self, path: &str, include_patterns: &[String]) -> bool {
+        if include_patterns.is_empty() {
+            return true;
+        }
+
+        include_patterns.iter().any(|pattern| {
+            if let Ok(glob) = glob::Pattern::new(pattern) {
+                glob.matches(path)
+            } else {
+                false
+            }
+        })
+    }
+
+    fn should_exclude(
+        &self,
+        path: &str,
+        exclude_patterns: &[String],
+        ignore_patterns: &[String],
+    ) -> bool {
+        exclude_patterns.iter().any(|pattern| {
+            if let Ok(glob) = glob::Pattern::new(pattern) {
+                glob.matches(path)
+            } else {
+                false
+            }
+        }) || ignore_patterns.iter().any(|p| path.contains(p.as_str()))
+    }
+
+    async fn build_tree(
+        &self,
+        repo_path: &str,
+        ref_name: Option<&str>,
+        path: &str,
+        exclude_patterns: &[String],
+        include_patterns: &[String],
+        ignore_patterns: &[String],
+        depth: usize,
+        max_depth: usize,
+    ) -> Result<RepoNode> {
+        if depth > max_depth {
+            return Ok(RepoNode {
+                name: path.split('/').last().unwrap_or(path).to_string(),
+                node_type: RepoItemType::Directory,
+                size: 0,
+                children: vec![],
+                file_count: 0,
+                dir_count: 1,
+            });
+        }
+
+        let contents = self
+            .fetch_repository_tree(repo_path, path, ref_name)
+            .await?;
+
+        let mut children = Vec::new();
+        let mut file_count = 0;
+        let mut dir_count = 1; // Count self
+        let mut total_size = 0;
+
+        for item in contents {
+            if !self.should_include(&item.path, include_patterns)
+                || self.should_exclude(&item.path, exclude_patterns, ignore_patterns)
+            {
+                continue;
+            }
+
+            match item.item_type {
+                RepoItemType::File => {
+                    let size = item.size.unwrap_or(0);
+                    total_size += size;
+                    file_count += 1;
+
+                    children.push(RepoNode {
+                        name: item.name,
+                        node_type: RepoItemType::File,
+                        size,
+                        children: vec![],
+                        file_count: 1,
+                        dir_count: 0,
+                    });
+                }
+                RepoItemType::Directory => {
+                    // Use Box::pin for recursion in async functions
+                    let child_node = Box::pin(self.build_tree(
+                        repo_path,
+                        ref_name,
+                        &item.path,
+                        exclude_patterns,
+                        include_patterns,
+                        ignore_patterns,
+                        depth + 1,
+                        max_depth,
+                    ))
+                    .await?;
+
+                    file_count += child_node.file_count;
+                    dir_count += child_node.dir_count;
+                    total_size += child_node.size;
+
+                    children.push(child_node);
+                }
+            }
+
+            // Check file limit
+            if file_count > MAX_FILES {
+                break;
+            }
+        }
+
+        // Sort children: directories first, then files, both alphabetically
+        children.sort_by(|a, b| match (a.node_type, b.node_type) {
+            (RepoItemType::Directory, RepoItemType::File) => std::cmp::Ordering::Less,
+            (RepoItemType::File, RepoItemType::Directory) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        });
+
+        Ok(RepoNode {
+            name: if path.is_empty() {
+                "root".to_string()
+            } else {
+                path.split('/').last().unwrap_or(path).to_string()
+            },
+            node_type: RepoItemType::Directory,
+            size: total_size,
+            children,
+            file_count,
+            dir_count,
+        })
+    }
+}
+
+#[async_trait]
+impl GitProvider for GitLabProvider {
+    fn name(&self) -> &str {
+        "gitlab"
+    }
+
+    async fn get_tree_structure(
+        &self,
+        repo_path: &str,
+        git_ref: Option<GitRef>,
+        exclude_patterns: Vec<String>,
+        include_patterns: Vec<String>,
+    ) -> Result<String> {
+        // Parse the repository path
+        let (encoded_path, path_branch) = self.parse_repo_path(repo_path)?;
+
+        // Fetch repository metadata
+        let metadata = self.fetch_repo_metadata(&encoded_path).await?;
+
+        // Determine which reference to use
+        let ref_name = match git_ref {
+            Some(GitRef::Branch(branch)) => Some(branch),
+            Some(GitRef::Tag(tag)) => Some(tag),
+            Some(GitRef::Commit(commit)) => Some(commit),
+            Some(GitRef::Default) => metadata.default_branch.clone(),
+            None => path_branch,
+        };
+
+        // Set up ignored patterns
+        let ignore_patterns = self
+            .set_ignore_patterns(&encoded_path, ref_name.as_deref())
+            .await?;
+
+        // Build repository tree
+        let max_depth = 10; // Limit recursion depth
+        let root_node = Box::pin(self.build_tree(
+            &encoded_path,
+            ref_name.as_deref(),
+            "",
+            &exclude_patterns,
+            &include_patterns,
+            &ignore_patterns,
+            0,
+            max_depth,
+        ))
+        .await?;
+
+        // Get the actual repo name from the path
+        let repo_name = metadata
+            .name
+            .unwrap_or_else(|| repo_path.split('/').last().unwrap_or(repo_path).to_string());
+
+        // Add the repo name as the root
+        let tree_node = RepoNode {
+            name: repo_name,
+            node_type: RepoItemType::Directory,
+            size: root_node.size,
+            children: root_node.children,
+            file_count: root_node.file_count,
+            dir_count: root_node.dir_count,
+        };
+
+        // Create the tree structure string
+        let tree_str = create_tree_structure(&tree_node, "", true);
+
+        Ok(tree_str)
+    }
+    
+    async fn get_file_content(
+        &self,
+        repo_path: &str,
+        file_path: &str,
+        git_ref: Option<GitRef>,
+    ) -> Result<String> {
+        // Parse the repository path
+        let (encoded_path, path_branch) = self.parse_repo_path(repo_path)?;
+        
+        // Determine which reference to use
+        let ref_name = match git_ref {
+            Some(GitRef::Branch(branch)) => Some(branch),
+            Some(GitRef::Tag(tag)) => Some(tag),
+            Some(GitRef::Commit(commit)) => Some(commit),
+            Some(GitRef::Default) => {
+                // Fetch repository metadata to get default branch
+                let metadata = self.fetch_repo_metadata(&encoded_path).await?;
+                metadata.default_branch
+            },
+            None => path_branch,
+        };
+        
+        // Fetch the file content
+        self.fetch_file_content(&encoded_path, file_path, ref_name.as_deref()).await
+    }
+}
