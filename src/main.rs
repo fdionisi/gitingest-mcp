@@ -6,7 +6,7 @@ use std::{env, sync::Arc};
 
 use anyhow::Result;
 use context_server::{ContextServer, ContextServerRpcRequest, ContextServerRpcResponse};
-use gitingest_mcp_tools::{RepositoryRead, RepositoryTreeView};
+use gitingest_mcp_tools::{FindRepositories, RepositoryRead, RepositoryTreeView};
 use http_client::HttpClient;
 use http_client_reqwest::HttpClientReqwest;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,6 +27,7 @@ impl ContextServerState {
         let tool_registry = Arc::new(ToolRegistry::default());
         tool_registry.register(Arc::new(RepositoryTreeView::new(http_client.clone())));
         tool_registry.register(Arc::new(RepositoryRead::new(http_client.clone())));
+        tool_registry.register(Arc::new(FindRepositories::new(http_client.clone())));
 
         let prompt_registry = Arc::new(PromptRegistry::default());
 

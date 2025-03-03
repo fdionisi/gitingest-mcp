@@ -32,7 +32,7 @@ pub trait GitProvider: Send + Sync {
         exclude_patterns: Vec<String>,
         include_patterns: Vec<String>,
     ) -> Result<String>;
-    
+
     /// Retrieve file content from a repository
     async fn get_file_content(
         &self,
@@ -40,6 +40,13 @@ pub trait GitProvider: Send + Sync {
         file_path: &str,
         git_ref: Option<GitRef>,
     ) -> Result<String>;
+
+    /// Search for repositories matching a query
+    async fn find_repositories(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<RepoSearchResult>>;
 }
 
 /// Represents a file or directory in a repository
@@ -66,6 +73,15 @@ pub struct RepoNode {
     pub children: Vec<RepoNode>,
     pub file_count: usize,
     pub dir_count: usize,
+}
+
+/// Represents a repository search result
+#[derive(Debug, Clone)]
+pub struct RepoSearchResult {
+    pub provider: String,
+    pub full_name: String,
+    pub description: Option<String>,
+    pub stargazers_count: usize,
 }
 
 /// Helper function to create a formatted tree structure
