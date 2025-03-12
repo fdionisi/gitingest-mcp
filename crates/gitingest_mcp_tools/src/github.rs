@@ -2,6 +2,7 @@ use std::{env, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use futures::future::join_all;
 use http_client::{HttpClient, Request, RequestBuilderExt, ResponseAsyncBodyExt, http::HeaderMap};
 
 use crate::{
@@ -207,7 +208,7 @@ impl GitHubProvider {
         Ok((user_name, repo_name, branch, path))
     }
 
-    fn api_url(&self, owner: &str, repo: &str, path: &str, branch: Option<&str>) -> String {
+    fn api_url(&self, owner: &str, repo: &str, path: &str, branch: Option<String>) -> String {
         let mut url = format!("https://api.github.com/repos/{}/{}/contents", owner, repo);
 
         if !path.is_empty() {
@@ -226,7 +227,7 @@ impl GitHubProvider {
         owner: &str,
         repo: &str,
         path: &str,
-        branch: Option<&str>,
+        branch: Option<String>,
     ) -> Result<Vec<RepoItem>> {
         let url = self.api_url(owner, repo, path, branch);
 
@@ -301,7 +302,7 @@ impl GitHubProvider {
         owner: &str,
         repo: &str,
         path: &str,
-        git_ref: Option<&str>,
+        git_ref: Option<String>,
     ) -> Result<String> {
         let url = self.api_url(owner, repo, path, git_ref);
 
@@ -373,7 +374,7 @@ impl GitHubProvider {
         &self,
         owner: &str,
         repo: &str,
-        branch: Option<&str>,
+        branch: Option<String>,
     ) -> Result<Vec<String>> {
         let ignore_patterns = DEFAULT_IGNORE_PATTERNS
             .iter()
@@ -391,7 +392,7 @@ impl GitHubProvider {
         Ok(ignore_patterns)
     }
 
-    fn should_include(&self, path: &str, include_patterns: &[String]) -> bool {
+    fn should_include(&self, path: &str, include_patterns: Vec<String>) -> bool {
         if include_patterns.is_empty() {
             return true;
         }
@@ -408,12 +409,12 @@ impl GitHubProvider {
     fn should_exclude(
         &self,
         path: &str,
-        exclude_patterns: &[String],
-        ignore_patterns: &[String],
+        exclude_patterns: Vec<String>,
+        ignore_patterns: Vec<String>,
     ) -> bool {
         exclude_patterns.iter().any(|pattern| {
             if let Ok(glob) = glob::Pattern::new(pattern) {
-                glob.matches(path)
+                glob.matches(&path)
             } else {
                 false
             }
@@ -422,19 +423,19 @@ impl GitHubProvider {
 
     async fn build_tree(
         &self,
-        owner: &str,
-        repo: &str,
-        branch: Option<&str>,
-        path: &str,
-        exclude_patterns: &[String],
-        include_patterns: &[String],
-        ignore_patterns: &[String],
+        owner: String,
+        repo: String,
+        branch: Option<String>,
+        path: String,
+        exclude_patterns: Vec<String>,
+        include_patterns: Vec<String>,
+        ignore_patterns: Vec<String>,
         depth: usize,
         max_depth: usize,
     ) -> Result<RepoNode> {
         if depth > max_depth {
             return Ok(RepoNode {
-                name: path.split('/').last().unwrap_or(path).to_string(),
+                name: path.split('/').last().unwrap_or(&path).to_string(),
                 node_type: RepoItemType::Directory,
                 size: 0,
                 children: vec![],
@@ -443,16 +444,24 @@ impl GitHubProvider {
             });
         }
 
-        let contents = self.fetch_contents(owner, repo, path, branch).await?;
+        let contents = self
+            .fetch_contents(&owner, &repo, &path, branch.clone())
+            .await?;
 
         let mut children = Vec::new();
         let mut file_count = 0;
         let mut dir_count = 1; // Count self
         let mut total_size = 0;
 
+        let mut tasks = Vec::new();
+
         for item in contents {
-            if !self.should_include(&item.path, include_patterns)
-                || self.should_exclude(&item.path, exclude_patterns, ignore_patterns)
+            if !self.should_include(&item.path, include_patterns.clone())
+                || self.should_exclude(
+                    &item.path,
+                    exclude_patterns.clone(),
+                    ignore_patterns.clone(),
+                )
             {
                 continue;
             }
@@ -473,31 +482,44 @@ impl GitHubProvider {
                     });
                 }
                 RepoItemType::Directory => {
-                    // Use Box::pin for recursion in async functions
-                    let child_node = Box::pin(self.build_tree(
+                    let owner = owner.to_string();
+                    let repo = repo.to_string();
+                    let branch = branch.clone();
+                    let path = item.path;
+                    let exclude_patterns = exclude_patterns.to_vec();
+                    let include_patterns = include_patterns.to_vec();
+                    let ignore_patterns = ignore_patterns.to_vec();
+
+                    tasks.push(self.build_tree(
                         owner,
                         repo,
                         branch,
-                        &item.path,
+                        path,
                         exclude_patterns,
                         include_patterns,
                         ignore_patterns,
                         depth + 1,
                         max_depth,
-                    ))
-                    .await?;
-
-                    file_count += child_node.file_count;
-                    dir_count += child_node.dir_count;
-                    total_size += child_node.size;
-
-                    children.push(child_node);
+                    ));
                 }
             }
 
             // Check file limit
             if file_count > MAX_FILES {
                 break;
+            }
+        }
+
+        let results = join_all(tasks).await;
+        for result in results {
+            match result {
+                Ok(child_node) => {
+                    file_count += child_node.file_count;
+                    dir_count += child_node.dir_count;
+                    total_size += child_node.size;
+                    children.push(child_node);
+                }
+                Err(e) => eprintln!("Task join error: {:?}", e),
             }
         }
 
@@ -509,7 +531,7 @@ impl GitHubProvider {
         });
 
         Ok(RepoNode {
-            name: path.split('/').last().unwrap_or(path).to_string(),
+            name: path.split('/').last().unwrap_or(&path).to_string(),
             node_type: RepoItemType::Directory,
             size: total_size,
             children,
@@ -555,19 +577,19 @@ impl GitProvider for GitHubProvider {
 
         // Set up ignored patterns from .gitignore
         let ignore_patterns = self
-            .set_ignore_patterns(&owner, &repo, ref_name.as_deref())
+            .set_ignore_patterns(&owner, &repo, ref_name.clone())
             .await?;
 
         // Build the repository tree
         let max_depth = 10; // Limit recursion depth
         let root_node = Box::pin(self.build_tree(
-            &owner,
-            &repo,
-            ref_name.as_deref(),
-            "",
-            &exclude_patterns,
-            &include_patterns,
-            &ignore_patterns,
+            owner,
+            repo.clone(),
+            ref_name,
+            "".into(),
+            exclude_patterns,
+            include_patterns,
+            ignore_patterns,
             0,
             max_depth,
         ))
@@ -575,7 +597,7 @@ impl GitProvider for GitHubProvider {
 
         // Add the repo name as the root
         let tree_node = RepoNode {
-            name: repo.clone(),
+            name: repo,
             node_type: RepoItemType::Directory,
             size: root_node.size,
             children: root_node.children,
@@ -617,7 +639,7 @@ impl GitProvider for GitHubProvider {
         };
 
         // Fetch the file content
-        self.fetch_file_content(&owner, &repo, file_path, ref_name.as_deref())
+        self.fetch_file_content(&owner, &repo, file_path, ref_name)
             .await
     }
 
