@@ -78,7 +78,11 @@ impl GitHubProvider {
             return Err(anyhow!("Empty search query is not allowed"));
         }
 
-        let mut url = format!("https://api.github.com/search/repositories?q={}", query);
+        let encoded_query = urlencoding::encode(query);
+        let mut url = format!(
+            "https://api.github.com/search/repositories?q={}",
+            encoded_query
+        );
         eprintln!("Searching GitHub repositories with URL: {}", url);
 
         // Add per_page parameter if limit is provided

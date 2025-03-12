@@ -319,7 +319,7 @@ impl ToolExecutor for FindRepositories {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query to find repositories (e.g., 'rust web framework', 'machine learning python')"
+                        "description": "Search query to find repositories (e.g., 'lang:rust web framework', 'machine learning lang:python')"
                     },
                     "limit": {
                         "type": "string",
