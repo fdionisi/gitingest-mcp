@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "gitingest-mcp"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "gitingest_mcp_tools"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
