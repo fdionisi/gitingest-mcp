@@ -3,15 +3,11 @@ use std::{env, sync::Arc};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::future::join_all;
-use http_client::{HttpClient, Request, RequestBuilderExt, ResponseAsyncBodyExt, http::HeaderMap};
-
-use crate::{
+use git_provider::{
+    GitProvider, GitRef, RepoItem, RepoItemType, RepoNode, RepoSearchResult, create_tree_structure,
     ignore_patterns::DEFAULT_IGNORE_PATTERNS,
-    provider::{
-        GitProvider, GitRef, RepoItem, RepoItemType, RepoNode, RepoSearchResult,
-        create_tree_structure,
-    },
 };
+use http_client::{HttpClient, Request, RequestBuilderExt, ResponseAsyncBodyExt, http::HeaderMap};
 
 // GitHub search repositories API response model
 #[derive(Debug, serde::Deserialize)]

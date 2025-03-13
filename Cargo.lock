@@ -326,13 +326,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
+name = "git_provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+]
+
+[[package]]
+name = "github_provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.13.1",
+ "futures",
+ "git_provider",
+ "glob",
+ "http-client",
+ "serde",
+ "serde_json",
+ "urlencoding",
+]
+
+[[package]]
 name = "gitingest-mcp"
 version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
  "context-server",
+ "git_provider",
+ "github_provider",
  "gitingest_mcp_tools",
+ "gitlab_provider",
  "http-client",
  "http-client-reqwest",
  "parking_lot",
@@ -349,12 +376,29 @@ dependencies = [
  "base64 0.13.1",
  "context-server",
  "futures",
+ "git_provider",
  "glob",
  "http-client",
  "http-client-reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "urlencoding",
+]
+
+[[package]]
+name = "gitlab_provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.13.1",
+ "futures",
+ "git_provider",
+ "glob",
+ "http-client",
+ "serde",
+ "serde_json",
  "urlencoding",
 ]
 

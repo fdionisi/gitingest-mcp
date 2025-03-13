@@ -1,13 +1,12 @@
 [package]
-name = "gitingest_mcp_tools"
-version = "0.2.2"
+name = "gitlab_provider"
+version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
-context-server.workspace = true
 futures.workspace = true
 git_provider = { path = "../git_provider" }
 glob.workspace = true
@@ -15,7 +14,3 @@ http-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 urlencoding.workspace = true
-
-[dev-dependencies]
-tokio = { version = "1.42", features = ["full", "test-util"] }
-http-client-reqwest.workspace = true

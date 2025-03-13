@@ -6,7 +6,10 @@ use std::{env, sync::Arc};
 
 use anyhow::Result;
 use context_server::{ContextServer, ContextServerRpcRequest, ContextServerRpcResponse};
+use git_provider::GitProvider;
+use github_provider::GitHubProvider;
 use gitingest_mcp_tools::{FindRepositories, RepositoryRead, RepositoryTreeView};
+use gitlab_provider::GitLabProvider;
 use http_client::HttpClient;
 use http_client_reqwest::HttpClientReqwest;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -24,10 +27,15 @@ impl ContextServerState {
     fn new(http_client: Arc<dyn HttpClient>) -> Result<Self> {
         let resource_registry = Arc::new(ResourceRegistry::default());
 
+        let providers: Vec<Arc<dyn GitProvider>> = vec![
+            Arc::new(GitHubProvider::new(http_client.clone())),
+            Arc::new(GitLabProvider::new(http_client.clone())),
+        ];
+
         let tool_registry = Arc::new(ToolRegistry::default());
-        tool_registry.register(Arc::new(RepositoryTreeView::new(http_client.clone())));
-        tool_registry.register(Arc::new(RepositoryRead::new(http_client.clone())));
-        tool_registry.register(Arc::new(FindRepositories::new(http_client.clone())));
+        tool_registry.register(Arc::new(RepositoryTreeView::new(providers.clone())));
+        tool_registry.register(Arc::new(RepositoryRead::new(providers.clone())));
+        tool_registry.register(Arc::new(FindRepositories::new(providers.clone())));
 
         let prompt_registry = Arc::new(PromptRegistry::default());
 

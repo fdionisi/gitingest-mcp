@@ -2,15 +2,12 @@ use std::{env, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use http_client::{HttpClient, Request, RequestBuilderExt, ResponseAsyncBodyExt, http::HeaderMap};
-
-use crate::{
+use futures::future;
+use git_provider::{
+    GitProvider, GitRef, RepoItem, RepoItemType, RepoNode, RepoSearchResult, create_tree_structure,
     ignore_patterns::DEFAULT_IGNORE_PATTERNS,
-    provider::{
-        GitProvider, GitRef, RepoItem, RepoItemType, RepoNode, RepoSearchResult,
-        create_tree_structure,
-    },
 };
+use http_client::{HttpClient, Request, RequestBuilderExt, ResponseAsyncBodyExt, http::HeaderMap};
 
 const MAX_FILES: usize = 500;
 
@@ -394,18 +391,18 @@ impl GitLabProvider {
 
     async fn build_tree(
         &self,
-        repo_path: &str,
-        ref_name: Option<&str>,
-        path: &str,
-        exclude_patterns: &[String],
-        include_patterns: &[String],
-        ignore_patterns: &[String],
+        repo_path: String,
+        ref_name: Option<String>,
+        path: String,
+        exclude_patterns: Vec<String>,
+        include_patterns: Vec<String>,
+        ignore_patterns: Vec<String>,
         depth: usize,
         max_depth: usize,
     ) -> Result<RepoNode> {
         if depth > max_depth {
             return Ok(RepoNode {
-                name: path.split('/').last().unwrap_or(path).to_string(),
+                name: path.split('/').last().unwrap_or(&path).to_string(),
                 node_type: RepoItemType::Directory,
                 size: 0,
                 children: vec![],
@@ -415,7 +412,7 @@ impl GitLabProvider {
         }
 
         let contents = self
-            .fetch_repository_tree(repo_path, path, ref_name)
+            .fetch_repository_tree(&repo_path, &path, ref_name.as_deref())
             .await?;
 
         let mut children = Vec::new();
@@ -423,9 +420,11 @@ impl GitLabProvider {
         let mut dir_count = 1; // Count self
         let mut total_size = 0;
 
+        let mut tasks = Vec::new();
+
         for item in contents {
-            if !self.should_include(&item.path, include_patterns)
-                || self.should_exclude(&item.path, exclude_patterns, ignore_patterns)
+            if !self.should_include(&item.path, &include_patterns)
+                || self.should_exclude(&item.path, &exclude_patterns, &ignore_patterns)
             {
                 continue;
             }
@@ -446,30 +445,42 @@ impl GitLabProvider {
                     });
                 }
                 RepoItemType::Directory => {
-                    // Use Box::pin for recursion in async functions
-                    let child_node = Box::pin(self.build_tree(
+                    let repo_path = repo_path.clone();
+                    let ref_name = ref_name.clone();
+                    let path = item.path;
+                    let exclude_patterns = exclude_patterns.clone();
+                    let include_patterns = include_patterns.clone();
+                    let ignore_patterns = ignore_patterns.clone();
+
+                    tasks.push(self.build_tree(
                         repo_path,
                         ref_name,
-                        &item.path,
+                        path,
                         exclude_patterns,
                         include_patterns,
                         ignore_patterns,
                         depth + 1,
                         max_depth,
-                    ))
-                    .await?;
-
-                    file_count += child_node.file_count;
-                    dir_count += child_node.dir_count;
-                    total_size += child_node.size;
-
-                    children.push(child_node);
+                    ));
                 }
             }
 
             // Check file limit
             if file_count > MAX_FILES {
                 break;
+            }
+        }
+
+        let results = future::join_all(tasks).await;
+        for result in results {
+            match result {
+                Ok(child_node) => {
+                    file_count += child_node.file_count;
+                    dir_count += child_node.dir_count;
+                    total_size += child_node.size;
+                    children.push(child_node);
+                }
+                Err(e) => eprintln!("Error building tree: {:?}", e),
             }
         }
 
@@ -484,7 +495,7 @@ impl GitLabProvider {
             name: if path.is_empty() {
                 "root".to_string()
             } else {
-                path.split('/').last().unwrap_or(path).to_string()
+                path.split('/').last().unwrap_or(&path).to_string()
             },
             node_type: RepoItemType::Directory,
             size: total_size,
@@ -530,17 +541,18 @@ impl GitProvider for GitLabProvider {
 
         // Build repository tree
         let max_depth = 10; // Limit recursion depth
-        let root_node = Box::pin(self.build_tree(
-            &encoded_path,
-            ref_name.as_deref(),
-            "",
-            &exclude_patterns,
-            &include_patterns,
-            &ignore_patterns,
-            0,
-            max_depth,
-        ))
-        .await?;
+        let root_node = self
+            .build_tree(
+                encoded_path.clone(),
+                ref_name,
+                "".into(),
+                exclude_patterns,
+                include_patterns,
+                ignore_patterns,
+                0,
+                max_depth,
+            )
+            .await?;
 
         // Get the actual repo name from the path
         let repo_name = metadata

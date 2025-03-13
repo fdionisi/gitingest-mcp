@@ -7,7 +7,10 @@ edition = "2024"
 anyhow.workspace = true
 async-trait.workspace = true
 context-server.workspace = true
+git_provider = { path = "crates/git_provider" }
+github_provider = { path = "crates/github_provider" }
 gitingest_mcp_tools = { path = "crates/gitingest_mcp_tools" }
+gitlab_provider = { path = "crates/gitlab_provider" }
 http-client-reqwest.workspace = true
 http-client.workspace = true
 parking_lot = "0.12.3"
@@ -16,7 +19,12 @@ tokio = { version = "1.42", features = ["full"] }
 
 [workspace]
 resolver = "3"
-members = ["crates/gitingest_mcp_tools"]
+members = [
+    "crates/git_provider",
+    "crates/github_provider",
+    "crates/gitingest_mcp_tools",
+    "crates/gitlab_provider",
+]
 
 [workspace.dependencies]
 anyhow = "1"
