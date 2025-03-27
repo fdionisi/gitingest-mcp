@@ -30,11 +30,11 @@ members = [
 anyhow = "1"
 async-trait = "0.1.83"
 base64 = "0.13.0"
-context-server = { git = "https://github.com/fdionisi/context-server", version = "0.8.2" }
+context-server = { git = "https://github.com/fdionisi/context-server", version = "0.8" }
 futures = "0.3"
 glob = "0.3.2"
-http-client = { git = "https://github.com/fdionisi/http-client", version = "0.2.0" }
-http-client-reqwest = { git = "https://github.com/fdionisi/http-client", version = "0.2.0" }
+http-client = { git = "https://github.com/fdionisi/http-client", version = "0.4" }
+http-client-reqwest = { git = "https://github.com/fdionisi/http-client", version = "0.3" }
 indoc = "2.0.5"
 serde = "1"
 serde_json = "1"
